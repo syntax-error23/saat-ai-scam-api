@@ -62,7 +62,10 @@ def extract_intelligence(messages: list[dict]) -> dict:
     result["bank_accounts"] = list(set(result["bank_accounts"]))
     return result
 
-# WEBHOOK (HONEYPOT ENDPOINT)
+#WEBHOOK
+
+from fastapi import Request
+
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
 @app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook_handler(
@@ -70,8 +73,12 @@ async def webhook_handler(
     req: ScamRequest | None = None,
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # ---- Tester sends POST without body ----
-    if request.method == "POST" and req is None:
+    # ---- Tester preflight ----
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return {"status": "ok"}
+
+    # ---- Tester POST with NO BODY ----
+    if req is None:
         return {
             "is_scam": False,
             "scam_type": "none",
@@ -85,11 +92,7 @@ async def webhook_handler(
             }
         }
 
-    # ---- Tester preflight ----
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        return {"status": "ok"}
-
-    # ---- Auth ----
+    # ---- Normal authenticated POST ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
