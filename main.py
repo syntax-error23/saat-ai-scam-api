@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header
+from fastapi import Request
 from pydantic import BaseModel
 import os
 import re
@@ -64,15 +65,17 @@ print(run_agent)
 
 
 # Webhook 
-@app.get("/webhook")
-def webhook_get():
-    return {"status": "ok"}
-
-@app.post("/webhook")
-def webhook(
-    req: ScamRequest,
-    x_api_key: str = Header(..., alias="X-API-Key")
+@app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def webhook_handler(
+    request: Request,
+    req: ScamRequest | None = None,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
+    # ---- Preflight / tester checks ----
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return {"status": "ok"}
+
+    # ---- Actual POST logic ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -81,18 +84,13 @@ def webhook(
     if cid not in MEMORY:
         MEMORY[cid] = []
 
-    # Append user message
     MEMORY[cid].append({
         "role": "user",
         "content": req.message
     })
     MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
 
-    # Detect scam
-    try:
-        detection = detect_scam(MEMORY[cid])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    detection = detect_scam(MEMORY[cid])
 
     response = {
         "is_scam": detection["is_scam"],
@@ -107,13 +105,8 @@ def webhook(
         }
     }
 
-    # Run agent if scam
     if detection["is_scam"]:
-        try:
-            agent_reply = run_agent(MEMORY[cid], detection["scam_type"])
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
+        agent_reply = run_agent(MEMORY[cid], detection["scam_type"])
         MEMORY[cid].append({
             "role": "assistant",
             "content": agent_reply
@@ -121,17 +114,6 @@ def webhook(
         MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
 
         response["agent_reply"] = agent_reply
-
-        # Extract intelligence from FULL conversation
         response["extracted_intelligence"] = extract_intelligence(MEMORY[cid])
 
     return response
-
-# Warmup
-@app.on_event("startup")
-def warmup():
-    try:
-        detect_scam([{"role": "user", "content": "hello"}])
-        print("LLM warmed up")
-    except:
-        pass
