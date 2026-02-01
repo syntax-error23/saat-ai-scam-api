@@ -6,6 +6,10 @@ import re
 
 from llm_router import detect_scam, run_agent
 
+@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def root(request: Request):
+    return {"status": "ok"}
+
 app = FastAPI(
     title="SAAT AI Scam Detection API",
     version="0.1.0"
