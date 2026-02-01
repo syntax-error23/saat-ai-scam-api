@@ -62,27 +62,22 @@ def extract_intelligence(messages: list[dict]) -> dict:
     result["bank_accounts"] = list(set(result["bank_accounts"]))
     return result
 
-# HONEYPOT WEBHOOK
-from fastapi import Request
+#WEBHOOK
+from fastapi import Body
 
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
 @app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook_handler(
     request: Request,
+    req: ScamRequest | None = Body(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # ---- Tester preflight ----
+    # ---- Tester preflight (THIS IS REQUIRED) ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
-    # ---- Try to read body safely ----
-    try:
-        body = await request.json()
-    except:
-        body = None
-
-    # ---- Tester sends EMPTY body ----
-    if not body:
+    # ---- EMPTY BODY HANDLING (THIS FIXES INVALID_REQUEST_BODY) ----
+    if req is None:
         return {
             "is_scam": False,
             "scam_type": "none",
@@ -96,11 +91,9 @@ async def webhook_handler(
             }
         }
 
-    # ---- Auth ----
+    # ---- AUTH ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
-
-    req = ScamRequest(**body)
 
     cid = req.conversation_id
     MEMORY.setdefault(cid, [])
