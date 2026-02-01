@@ -62,22 +62,22 @@ def extract_intelligence(messages: list[dict]) -> dict:
     result["bank_accounts"] = list(set(result["bank_accounts"]))
     return result
 
-#WEBHOOK
-
-from fastapi import Request
-
+# HONEYPOT WEBHOOK
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
 @app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook_handler(
     request: Request,
-    req: ScamRequest | None = None,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key")
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    req: ScamRequest | None = None
 ):
-    # ---- Tester preflight ----
+    # Tester / preflight requests 
     if request.method in ("GET", "HEAD", "OPTIONS"):
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "service": "agentic-honeypot"
+        }
 
-    # ---- Tester POST with NO BODY ----
+    # Tester sends POST with EMPTY body 
     if req is None:
         return {
             "is_scam": False,
@@ -92,7 +92,7 @@ async def webhook_handler(
             }
         }
 
-    # ---- Normal authenticated POST ----
+    # Auth 
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
