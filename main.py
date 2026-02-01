@@ -70,10 +70,26 @@ async def webhook_handler(
     req: ScamRequest | None = None,
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # Tester preflight
+    # ---- Tester sends POST without body ----
+    if request.method == "POST" and req is None:
+        return {
+            "is_scam": False,
+            "scam_type": "none",
+            "confidence": 0.0,
+            "agent_reply": None,
+            "extracted_intelligence": {
+                "upi_ids": [],
+                "phone_numbers": [],
+                "bank_accounts": [],
+                "urls": []
+            }
+        }
+
+    # ---- Tester preflight ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
+    # ---- Auth ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
