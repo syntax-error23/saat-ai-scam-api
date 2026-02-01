@@ -64,6 +64,10 @@ print(run_agent)
 
 
 # Webhook 
+@app.get("/webhook")
+def webhook_get():
+    return {"status": "ok"}
+
 @app.post("/webhook")
 def webhook(
     req: ScamRequest,
@@ -131,4 +135,3 @@ def warmup():
         print("LLM warmed up")
     except:
         pass
-    
