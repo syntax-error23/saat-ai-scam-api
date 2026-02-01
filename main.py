@@ -63,21 +63,27 @@ def extract_intelligence(messages: list[dict]) -> dict:
     return result
 
 #WEBHOOK
-from fastapi import Body
-
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
-@app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
-async def webhook_handler(
+async def webhook(
     request: Request,
-    req: ScamRequest | None = Body(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # ---- Tester preflight (THIS IS REQUIRED) ----
+    # ---- Allow tester preflight ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
-    # ---- EMPTY BODY HANDLING (THIS FIXES INVALID_REQUEST_BODY) ----
-    if req is None:
+    # ---- Auth check ----
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # ---- Try reading JSON body ----
+    try:
+        body = await request.json()
+    except:
+        body = None
+
+    # ---- TESTER CASE: no body ----
+    if not body:
         return {
             "is_scam": False,
             "scam_type": "none",
@@ -91,17 +97,15 @@ async def webhook_handler(
             }
         }
 
-    # ---- AUTH ----
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # ---- REAL EVALUATION CASE ----
+    cid = body.get("conversation_id")
+    message = body.get("message")
 
-    cid = req.conversation_id
+    if not cid or not message:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
     MEMORY.setdefault(cid, [])
-
-    MEMORY[cid].append({
-        "role": "user",
-        "content": req.message
-    })
+    MEMORY[cid].append({"role": "user", "content": message})
     MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
 
     detection = detect_scam(MEMORY[cid])
@@ -121,10 +125,7 @@ async def webhook_handler(
 
     if detection["is_scam"]:
         agent_reply = run_agent(MEMORY[cid], detection["scam_type"])
-        MEMORY[cid].append({
-            "role": "assistant",
-            "content": agent_reply
-        })
+        MEMORY[cid].append({"role": "assistant", "content": agent_reply})
         MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
 
         response["agent_reply"] = agent_reply
