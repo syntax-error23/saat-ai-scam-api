@@ -66,16 +66,17 @@ print(run_agent)
 
 # Webhook 
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook_handler(
     request: Request,
     req: ScamRequest | None = None,
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # ---- Preflight / tester checks ----
+    # ---- Preflight checks (tester hits these) ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
-    # ---- Actual POST logic ----
+    # ---- POST logic ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
