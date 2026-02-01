@@ -2,32 +2,16 @@ import os
 import json
 from groq import Groq
 
-import re
-
-def extract_signals(text: str) -> dict:
-    upi_pattern = r"\b[\w.\-]{2,}@[a-zA-Z]{2,}\b"
-    phone_pattern = r"\b(?:\+91[-\s]?)?[6-9]\d{9}\b"
-    url_pattern = r"https?://[^\s]+"
-    bank_acct_pattern = r"\b\d{9,18}\b"
-
-    return {
-        "upi_ids": list(set(re.findall(upi_pattern, text))),
-        "phone_numbers": list(set(re.findall(phone_pattern, text))),
-        "urls": list(set(re.findall(url_pattern, text))),
-        "bank_accounts": list(set(re.findall(bank_acct_pattern, text))),
-    }
-
-
-# ---- Groq setup ----
+# LLM Setup (Groq)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not set")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL = "llama-3.1-8b-instant"  # fast + supported
+MODEL = "llama-3.1-8b-instant" 
 
-
+# Scam Detector
 def detect_scam(messages: list[dict]) -> dict:
     """
     messages = [
@@ -38,28 +22,24 @@ def detect_scam(messages: list[dict]) -> dict:
     """
 
     system_prompt = """
-You are an AI scam detection and safety assistant.
+You are an AI scam detection assistant.
 
-Tasks:
-1. Decide if the message is a scam
-2. If it IS a scam, generate a polite, safe reply the user can send
-3. If it is NOT a scam, set safe_reply to null
+Your task:
+Decide whether the conversation indicates a scam.
 
 Rules:
 - Respond ONLY in valid JSON
 - No markdown
 - No extra keys
-- Be concise and practical
 
 JSON format:
 {
   "is_scam": true or false,
   "scam_type": "payment" | "phishing" | "lottery" | "impersonation" | "other" | "none",
   "confidence": number between 0 and 1,
-  "reason": "short explanation",
-  "safe_reply": "message user can send" or null
+  "reason": "short explanation"
 }
-"""
+""".strip()
 
     completion = client.chat.completions.create(
         model=MODEL,
@@ -76,3 +56,87 @@ JSON format:
         return json.loads(raw)
     except json.JSONDecodeError:
         raise ValueError(f"Invalid JSON from model:\n{raw}")
+
+
+def run_agent(memory: list[dict], scam_type: str | None = None) -> str:
+    """
+    Very casual, human-like reply generator.
+    Sounds like a real person texting, not an AI.
+    """
+
+    SYSTEM_PROMPT = """
+you are a normal person texting casually.
+
+you do not know this is a scam.
+you think it *might* be real.
+
+how you type:
+- all lowercase
+- short messages
+- slightly informal
+- no perfect grammar
+- no formal tone
+- commas are ok
+- avoid long sentences
+- 1 message only
+
+rules:
+- never mention scams, fraud, police, safety
+- never accuse or sound suspicious
+- never analyze
+- ask just one simple follow-up
+- sound a bit confused or curious
+- do NOT be overly polite or excited
+
+reply with ONLY the message text.
+""".strip()
+
+    SCAM_FOLLOWUPS = {
+        "lottery": [
+            "wait how does this work",
+            "what do i need to do to claim it",
+            "which company is this from"
+        ],
+        "payment": [
+            "ok how do i pay",
+            "where am i supposed to send it",
+            "is this online or what"
+        ],
+        "phishing": [
+            "can you send the link again",
+            "what is this for exactly",
+            "where does this take me"
+        ],
+        "impersonation": [
+            "can you share your official number",
+            "how do i verify this",
+            "is there someone i can contact"
+        ],
+        "other": [
+            "can you explain a bit",
+            "not sure i get this",
+            "what is this about"
+        ]
+    }
+
+    options = SCAM_FOLLOWUPS.get(scam_type or "other", SCAM_FOLLOWUPS["other"])
+    followup = options[0]  # deterministic, avoids randomness weirdness
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        temperature=0.8,
+        max_tokens=40,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *memory,
+            {"role": "assistant", "content": followup}
+        ]
+    )
+
+    reply = completion.choices[0].message.content.strip().lower()
+
+    if not reply:
+        reply = "can you explain this"
+
+    return reply
+
