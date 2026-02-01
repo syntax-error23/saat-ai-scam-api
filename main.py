@@ -1,38 +1,37 @@
-from fastapi import FastAPI, HTTPException, Header
-from fastapi import Request
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 import os
 import re
 
 from llm_router import detect_scam, run_agent
 
-@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
-async def root(request: Request):
-    return {"status": "ok"}
-
 app = FastAPI(
     title="SAAT AI Scam Detection API",
     version="0.1.0"
 )
 
-# API Key
-API_KEY = os.getenv("SAAT_API_KEY", "DEV_SECRET_KEY")
+# ROOT ROUTE 
+@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def root(request: Request):
+    return {"status": "ok"}
 
-# Memory 
+# CONFIG
+
+API_KEY = os.getenv("SAAT_API_KEY", "DEV_SECRET_KEY")
 MEMORY = {}
 MAX_TURNS = 10
 
-# Request schema 
+# REQUEST SCHEMA
 class ScamRequest(BaseModel):
     conversation_id: str
     message: str
 
-# Health check 
+# HEALTH CHECK
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# Extractor
+# INTELLIGENCE EXTRACTOR
 def extract_intelligence(messages: list[dict]) -> dict:
     text = " ".join(m["content"] for m in messages)
 
@@ -43,32 +42,27 @@ def extract_intelligence(messages: list[dict]) -> dict:
         "urls": []
     }
 
-    # Phone numbers
-    phones = re.findall(r'\b(?:\+91[\s-]?)?[6-9]\d{9}\b', text)
-    result["phone_numbers"] = list(set(phones))
+    result["phone_numbers"] = list(set(
+        re.findall(r'\b(?:\+91[\s-]?)?[6-9]\d{9}\b', text)
+    ))
 
-    # UPI IDs
-    upis = re.findall(r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b', text)
-    result["upi_ids"] = list(set(upis))
+    result["upi_ids"] = list(set(
+        re.findall(r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b', text)
+    ))
 
-    # URLs
-    urls = re.findall(r'https?://[^\s]+', text)
-    result["urls"] = list(set(urls))
+    result["urls"] = list(set(
+        re.findall(r'https?://[^\s]+', text)
+    ))
 
-    # Bank accounts
     candidates = re.findall(r'\b\d{9,18}\b', text)
     for c in candidates:
         if c not in result["phone_numbers"]:
             result["bank_accounts"].append(c)
 
     result["bank_accounts"] = list(set(result["bank_accounts"]))
-
     return result
 
-print(run_agent)
-
-
-# Webhook 
+# WEBHOOK (HONEYPOT ENDPOINT)
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
 @app.api_route("/webhook/", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook_handler(
@@ -76,18 +70,15 @@ async def webhook_handler(
     req: ScamRequest | None = None,
     x_api_key: str | None = Header(default=None, alias="X-API-Key")
 ):
-    # ---- Preflight checks (tester hits these) ----
+    # Tester preflight
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
-    # ---- POST logic ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     cid = req.conversation_id
-
-    if cid not in MEMORY:
-        MEMORY[cid] = []
+    MEMORY.setdefault(cid, [])
 
     MEMORY[cid].append({
         "role": "user",
