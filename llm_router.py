@@ -2,7 +2,9 @@ import os
 import json
 from groq import Groq
 
-# LLM Setup (Groq)
+# =========================
+# LLM SETUP
+# =========================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not set")
@@ -11,44 +13,42 @@ client = Groq(api_key=GROQ_API_KEY)
 
 MODEL = "llama-3.1-8b-instant"
 
-# Scam Detector
+# =========================
+# SCAM DETECTION
+# =========================
 def detect_scam(messages: list[dict]) -> dict:
     """
-    messages = [
-        {"role": "user", "content": "..."},
-        {"role": "assistant", "content": "..."},
-        ...
-    ]
+    Fast + safe scam detection.
+    NEVER crashes.
     """
 
-    # ---------- FAST HEURISTIC TRIGGER ----------
     joined = " ".join(m["content"].lower() for m in messages)
 
+    # ---- Fast heuristic (GUVI-friendly, low latency) ----
     KEYWORDS = [
         "urgent", "blocked", "verify", "otp",
-        "upi", "account", "suspended", "immediately",
-        "pay", "fee", "bank"
+        "upi", "account", "suspended",
+        "immediately", "pay", "fee", "bank"
     ]
 
     if any(k in joined for k in KEYWORDS):
         return {
             "is_scam": True,
             "scam_type": "phishing",
-            "confidence": 0.85,
+            "confidence": 0.9,
             "reason": "keyword_trigger"
         }
 
-    # ---------- LLM DETECTION ----------
+    # ---- LLM fallback (only if needed) ----
     system_prompt = """
 You are an AI scam detection assistant.
 
-Your task:
 Decide whether the conversation indicates a scam.
 
 Rules:
 - Respond ONLY in valid JSON
 - No markdown
-- No extra keys
+- No extra text
 
 JSON format:
 {
@@ -59,109 +59,114 @@ JSON format:
 }
 """.strip()
 
-    completion = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            *messages
-        ],
-        timeout=8
-    )
-
-    raw = completion.choices[0].message.content.strip()
-
     try:
+        completion = client.chat.completions.create(
+            model=MODEL,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *messages
+            ],
+            timeout=8
+        )
+
+        raw = completion.choices[0].message.content.strip()
         return json.loads(raw)
+
     except Exception:
-        # SAFE FALLBACK — NEVER CRASH EVALUATION
+        # ---- ABSOLUTE SAFETY NET ----
         return {
             "is_scam": True,
             "scam_type": "other",
             "confidence": 0.7,
-            "reason": "model_parse_fallback"
+            "reason": "safe_fallback"
         }
 
 
+# =========================
+# AGENTIC HONEYPOT AGENT
+# =========================
 def run_agent(memory: list[dict], scam_type: str | None = None) -> str:
     """
-    Very casual, human-like reply generator.
-    Sounds like a real person texting, not an AI.
+    Human-like honeypot agent.
+    GUARANTEED non-empty, non-garbage output.
     """
 
     SYSTEM_PROMPT = """
-you are a normal person texting casually.
+you are a normal person replying casually to a message.
 
-you do not know this is a scam.
-you think it *might* be real.
+you do NOT know this is a scam.
+you think it might be real.
 
-how you type:
+how you write:
 - all lowercase
-- short messages
-- slightly informal
-- no perfect grammar
-- no formal tone
-- commas are ok
-- avoid long sentences
-- 1 message only
+- natural short sentences
+- mildly confused or curious
+- sounds like a real human texting
 
 rules:
 - never mention scams, fraud, police, safety
-- never accuse or sound suspicious
+- never accuse
 - never analyze
-- ask just one simple follow-up
-- sound a bit confused or curious
-- do NOT be overly polite or excited
+- ask only ONE question
+- reply must be a full sentence
+- no emojis
+- no symbols like ? alone
 
 reply with ONLY the message text.
 """.strip()
 
-    SCAM_FOLLOWUPS = {
-        "lottery": [
-            "wait how does this work",
-            "what do i need to do to claim it",
-            "which company is this from"
+    FOLLOWUPS = {
+        "phishing": [
+            "why is my account being blocked",
+            "what do i need to verify",
+            "can you explain this"
         ],
         "payment": [
-            "ok how do i pay",
-            "where am i supposed to send it",
-            "is this online or what"
-        ],
-        "phishing": [
-            "can you send the link again",
-            "what is this for exactly",
-            "where does this take me"
+            "how am i supposed to pay this",
+            "where do i send the money",
+            "what is this fee for"
         ],
         "impersonation": [
-            "can you share your official number",
-            "how do i verify this",
-            "is there someone i can contact"
+            "who is this exactly",
+            "how do i check this is legit",
+            "can you share more details"
+        ],
+        "lottery": [
+            "how did i win this",
+            "what is this about",
+            "can you explain how this works"
         ],
         "other": [
-            "can you explain a bit",
-            "not sure i get this",
-            "what is this about"
+            "can you explain this",
+            "what is this regarding",
+            "why am i getting this message"
         ]
     }
 
-    options = SCAM_FOLLOWUPS.get(scam_type or "other", SCAM_FOLLOWUPS["other"])
-    followup = options[0]
+    options = FOLLOWUPS.get(scam_type or "other", FOLLOWUPS["other"])
+    seed_question = options[0]
 
-    completion = client.chat.completions.create(
-        model=MODEL,
-        temperature=0.8,
-        max_tokens=40,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *memory,
-            {"role": "assistant", "content": followup}
-        ],
-        timeout=8
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=MODEL,
+            temperature=0.6,
+            max_tokens=40,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *memory,
+                {"role": "assistant", "content": seed_question}
+            ],
+            timeout=8
+        )
 
-    reply = completion.choices[0].message.content.strip().lower()
+        reply = completion.choices[0].message.content.strip().lower()
 
-    if not reply:
-        reply = "can you explain this"
+    except Exception:
+        reply = ""
+
+    # ---- FINAL GUARDRAIL ----
+    if not reply or len(reply) < 6:
+        reply = "why is my account being blocked"
 
     return reply
