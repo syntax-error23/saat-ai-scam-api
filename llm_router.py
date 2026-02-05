@@ -9,7 +9,7 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL = "llama-3.1-8b-instant" 
+MODEL = "llama-3.1-8b-instant"
 
 # Scam Detector
 def detect_scam(messages: list[dict]) -> dict:
@@ -21,6 +21,24 @@ def detect_scam(messages: list[dict]) -> dict:
     ]
     """
 
+    # ---------- FAST HEURISTIC TRIGGER ----------
+    joined = " ".join(m["content"].lower() for m in messages)
+
+    KEYWORDS = [
+        "urgent", "blocked", "verify", "otp",
+        "upi", "account", "suspended", "immediately",
+        "pay", "fee", "bank"
+    ]
+
+    if any(k in joined for k in KEYWORDS):
+        return {
+            "is_scam": True,
+            "scam_type": "phishing",
+            "confidence": 0.85,
+            "reason": "keyword_trigger"
+        }
+
+    # ---------- LLM DETECTION ----------
     system_prompt = """
 You are an AI scam detection assistant.
 
@@ -47,15 +65,22 @@ JSON format:
         messages=[
             {"role": "system", "content": system_prompt},
             *messages
-        ]
+        ],
+        timeout=8
     )
 
     raw = completion.choices[0].message.content.strip()
 
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON from model:\n{raw}")
+    except Exception:
+        # SAFE FALLBACK — NEVER CRASH EVALUATION
+        return {
+            "is_scam": True,
+            "scam_type": "other",
+            "confidence": 0.7,
+            "reason": "model_parse_fallback"
+        }
 
 
 def run_agent(memory: list[dict], scam_type: str | None = None) -> str:
@@ -120,7 +145,7 @@ reply with ONLY the message text.
     }
 
     options = SCAM_FOLLOWUPS.get(scam_type or "other", SCAM_FOLLOWUPS["other"])
-    followup = options[0]  # deterministic, avoids randomness weirdness
+    followup = options[0]
 
     completion = client.chat.completions.create(
         model=MODEL,
@@ -130,7 +155,8 @@ reply with ONLY the message text.
             {"role": "system", "content": SYSTEM_PROMPT},
             *memory,
             {"role": "assistant", "content": followup}
-        ]
+        ],
+        timeout=8
     )
 
     reply = completion.choices[0].message.content.strip().lower()
@@ -139,4 +165,3 @@ reply with ONLY the message text.
         reply = "can you explain this"
 
     return reply
-

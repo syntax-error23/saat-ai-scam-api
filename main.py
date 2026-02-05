@@ -7,128 +7,132 @@ from llm_router import detect_scam, run_agent
 
 app = FastAPI(
     title="SAAT AI Scam Detection API",
-    version="0.1.0"
+    version="0.2.0"
 )
 
-# ROOT ROUTE 
-@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
-async def root(request: Request):
-    return {"status": "ok"}
-
+# =========================
 # CONFIG
-
+# =========================
 API_KEY = os.getenv("SAAT_API_KEY", "DEV_SECRET_KEY")
 MEMORY = {}
 MAX_TURNS = 10
 
-# REQUEST SCHEMA
-class ScamRequest(BaseModel):
-    conversation_id: str
-    message: str
+# =========================
+# ROOT + HEALTH
+# =========================
+@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def root():
+    return {"status": "ok"}
 
-# HEALTH CHECK
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# INTELLIGENCE EXTRACTOR
+# =========================
+# INTELLIGENCE EXTRACTION
+# =========================
 def extract_intelligence(messages: list[dict]) -> dict:
     text = " ".join(m["content"] for m in messages)
 
-    result = {
-        "upi_ids": [],
-        "phone_numbers": [],
-        "bank_accounts": [],
-        "urls": []
+    phone_numbers = re.findall(
+        r'(?:\+91[\s-]?)?[6-9]\d{9}',
+        text
+    )
+
+    upi_ids = re.findall(
+        r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b',
+        text
+    )
+
+    urls = re.findall(
+        r'https?://[^\s]+',
+        text
+    )
+
+    bank_accounts = []
+    for num in re.findall(r'\b\d{9,18}\b', text):
+        if num not in phone_numbers:
+            bank_accounts.append(num)
+
+    return {
+        "upi_ids": list(set(upi_ids)),
+        "phone_numbers": list(set(phone_numbers)),
+        "bank_accounts": list(set(bank_accounts)),
+        "urls": list(set(urls))
     }
 
-    result["phone_numbers"] = list(set(
-        re.findall(r'\b(?:\+91[\s-]?)?[6-9]\d{9}\b', text)
-    ))
-
-    result["upi_ids"] = list(set(
-        re.findall(r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b', text)
-    ))
-
-    result["urls"] = list(set(
-        re.findall(r'https?://[^\s]+', text)
-    ))
-
-    candidates = re.findall(r'\b\d{9,18}\b', text)
-    for c in candidates:
-        if c not in result["phone_numbers"]:
-            result["bank_accounts"].append(c)
-
-    result["bank_accounts"] = list(set(result["bank_accounts"]))
-    return result
-
-#WEBHOOK
+# =========================
+# WEBHOOK
+# =========================
 @app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def webhook(
     request: Request,
-    x_api_key: str | None = Header(default=None, alias="X-API-Key")
+    x_api_key: str | None = Header(default=None, alias="x-api-key")
 ):
-    # ---- Allow tester preflight ----
+    # ---- Allow tester / preflight ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
-    # ---- Auth check ----
+    # ---- Auth ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # ---- Try reading JSON body ----
+    # ---- Parse JSON ----
     try:
         body = await request.json()
     except:
         body = None
 
-    # ---- TESTER CASE: no body ----
+    # ---- Tester case (empty body) ----
     if not body:
         return {
-            "is_scam": False,
-            "scam_type": "none",
-            "confidence": 0.0,
-            "agent_reply": None,
-            "extracted_intelligence": {
-                "upi_ids": [],
-                "phone_numbers": [],
-                "bank_accounts": [],
-                "urls": []
-            }
+            "status": "success",
+            "reply": "hello"
         }
 
-    # ---- REAL EVALUATION CASE ----
-    cid = body.get("conversation_id")
-    message = body.get("message")
+    # =========================
+    # GUVI FORMAT HANDLING
+    # =========================
+    session_id = body.get("sessionId")
+    message_obj = body.get("message", {})
+    message_text = message_obj.get("text")
 
-    if not cid or not message:
-        raise HTTPException(status_code=400, detail="Missing required fields")
+    if not session_id or not message_text:
+        raise HTTPException(status_code=400, detail="Invalid request format")
 
-    MEMORY.setdefault(cid, [])
-    MEMORY[cid].append({"role": "user", "content": message})
-    MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
+    # ---- Init memory ----
+    MEMORY.setdefault(session_id, [])
 
-    detection = detect_scam(MEMORY[cid])
+    # ---- Add incoming message ----
+    MEMORY[session_id].append({
+        "role": "user",
+        "content": message_text
+    })
+    MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
 
-    response = {
-        "is_scam": detection["is_scam"],
-        "scam_type": detection["scam_type"],
-        "confidence": detection["confidence"],
-        "agent_reply": None,
-        "extracted_intelligence": {
-            "upi_ids": [],
-            "phone_numbers": [],
-            "bank_accounts": [],
-            "urls": []
-        }
+    # ---- Detect scam (FAST) ----
+    detection = detect_scam(MEMORY[session_id])
+
+    # ---- Default reply (human-like but neutral) ----
+    reply_text = "can you explain this?"
+
+    # ---- If scam → activate agent ----
+    if detection.get("is_scam"):
+        reply_text = run_agent(
+            MEMORY[session_id],
+            detection.get("scam_type")
+        )
+
+        MEMORY[session_id].append({
+            "role": "assistant",
+            "content": reply_text
+        })
+        MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
+
+    # =========================
+    # REQUIRED RESPONSE FORMAT
+    # =========================
+    return {
+        "status": "success",
+        "reply": reply_text
     }
-
-    if detection["is_scam"]:
-        agent_reply = run_agent(MEMORY[cid], detection["scam_type"])
-        MEMORY[cid].append({"role": "assistant", "content": agent_reply})
-        MEMORY[cid] = MEMORY[cid][-MAX_TURNS:]
-
-        response["agent_reply"] = agent_reply
-        response["extracted_intelligence"] = extract_intelligence(MEMORY[cid])
-
-    return response
