@@ -6,7 +6,7 @@ from llm_router import detect_scam, run_agent
 
 app = FastAPI(
     title="SAAT AI Scam Detection API",
-    version="0.3.0"
+    version="0.3.1"
 )
 
 # =========================
@@ -23,8 +23,8 @@ MAX_TURNS = 10
 async def root():
     return {"status": "ok"}
 
-@app.get("/health")
-def health():
+@app.api_route("/health", methods=["GET", "HEAD", "OPTIONS"])
+async def health():
     return {"status": "ok"}
 
 # =========================
@@ -90,11 +90,10 @@ async def webhook(
         raise HTTPException(status_code=400, detail="Invalid request format")
 
     # =========================
-    # BUILD MEMORY (PROPERLY)
+    # BUILD MEMORY
     # =========================
     MEMORY.setdefault(session_id, [])
 
-    # Add previous conversation (only once)
     if not MEMORY[session_id] and history:
         for msg in history:
             role = "assistant" if msg.get("sender") == "user" else "user"
@@ -103,7 +102,6 @@ async def webhook(
                 "content": msg.get("text", "")
             })
 
-    # Add current incoming message
     MEMORY[session_id].append({
         "role": "user",
         "content": message_text
@@ -112,16 +110,12 @@ async def webhook(
     MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
 
     # =========================
-    # DETECTION
+    # DETECTION + AGENT
     # =========================
     detection = detect_scam(MEMORY[session_id])
 
-    # Default neutral reply
     reply_text = "can you explain this?"
 
-    # =========================
-    # AGENT ACTIVATION
-    # =========================
     if detection.get("is_scam"):
         reply_text = run_agent(
             MEMORY[session_id],
@@ -134,9 +128,6 @@ async def webhook(
         })
         MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
 
-    # =========================
-    # REQUIRED RESPONSE FORMAT
-    # =========================
     return {
         "status": "success",
         "reply": reply_text
