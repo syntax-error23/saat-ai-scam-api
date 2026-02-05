@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException, Header, Request
-from pydantic import BaseModel
 import os
 import re
 
@@ -7,7 +6,7 @@ from llm_router import detect_scam, run_agent
 
 app = FastAPI(
     title="SAAT AI Scam Detection API",
-    version="0.2.0"
+    version="0.3.0"
 )
 
 # =========================
@@ -34,20 +33,9 @@ def health():
 def extract_intelligence(messages: list[dict]) -> dict:
     text = " ".join(m["content"] for m in messages)
 
-    phone_numbers = re.findall(
-        r'(?:\+91[\s-]?)?[6-9]\d{9}',
-        text
-    )
-
-    upi_ids = re.findall(
-        r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b',
-        text
-    )
-
-    urls = re.findall(
-        r'https?://[^\s]+',
-        text
-    )
+    phone_numbers = re.findall(r'(?:\+91[\s-]?)?[6-9]\d{9}', text)
+    upi_ids = re.findall(r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b', text)
+    urls = re.findall(r'https?://[^\s]+', text)
 
     bank_accounts = []
     for num in re.findall(r'\b\d{9,18}\b', text):
@@ -69,7 +57,7 @@ async def webhook(
     request: Request,
     x_api_key: str | None = Header(default=None, alias="x-api-key")
 ):
-    # ---- Allow tester / preflight ----
+    # ---- Preflight / tester ----
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return {"status": "ok"}
 
@@ -77,13 +65,13 @@ async def webhook(
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # ---- Parse JSON ----
+    # ---- Parse body ----
     try:
         body = await request.json()
     except:
         body = None
 
-    # ---- Tester case (empty body) ----
+    # ---- Empty tester call ----
     if not body:
         return {
             "status": "success",
@@ -91,32 +79,49 @@ async def webhook(
         }
 
     # =========================
-    # GUVI FORMAT HANDLING
+    # GUVI REQUEST FORMAT
     # =========================
     session_id = body.get("sessionId")
     message_obj = body.get("message", {})
     message_text = message_obj.get("text")
+    history = body.get("conversationHistory", [])
 
     if not session_id or not message_text:
         raise HTTPException(status_code=400, detail="Invalid request format")
 
-    # ---- Init memory ----
+    # =========================
+    # BUILD MEMORY (PROPERLY)
+    # =========================
     MEMORY.setdefault(session_id, [])
 
-    # ---- Add incoming message ----
+    # Add previous conversation (only once)
+    if not MEMORY[session_id] and history:
+        for msg in history:
+            role = "assistant" if msg.get("sender") == "user" else "user"
+            MEMORY[session_id].append({
+                "role": role,
+                "content": msg.get("text", "")
+            })
+
+    # Add current incoming message
     MEMORY[session_id].append({
         "role": "user",
         "content": message_text
     })
+
     MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
 
-    # ---- Detect scam (FAST) ----
+    # =========================
+    # DETECTION
+    # =========================
     detection = detect_scam(MEMORY[session_id])
 
-    # ---- Default reply (human-like but neutral) ----
+    # Default neutral reply
     reply_text = "can you explain this?"
 
-    # ---- If scam → activate agent ----
+    # =========================
+    # AGENT ACTIVATION
+    # =========================
     if detection.get("is_scam"):
         reply_text = run_agent(
             MEMORY[session_id],
