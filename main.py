@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel
+from typing import List, Optional
 import os
 import re
 
 from llm_router import detect_scam, run_agent
 
 app = FastAPI(
-    title="SAAT AI Scam Detection API",
-    version="0.3.1"
+    title="Honeypot Scam Detection API",
+    version="1.0.0"
 )
 
 # =========================
@@ -14,26 +16,36 @@ app = FastAPI(
 # =========================
 API_KEY = os.getenv("SAAT_API_KEY", "DEV_SECRET_KEY")
 MEMORY = {}
-MAX_TURNS = 10
+MAX_TURNS = 15
+
 
 # =========================
-# ROOT + HEALTH
+# REQUEST MODELS
 # =========================
-@app.api_route("/", methods=["GET", "POST", "HEAD", "OPTIONS"])
+class Message(BaseModel):
+    text: str
+
+class ChatRequest(BaseModel):
+    sessionId: str
+    message: Message
+    conversationHistory: Optional[List[dict]] = []
+
+
+# =========================
+# ROOT
+# =========================
+@app.get("/")
 async def root():
     return {"status": "ok"}
 
-@app.api_route("/health", methods=["GET", "HEAD", "OPTIONS"])
-async def health():
-    return {"status": "ok"}
 
 # =========================
 # INTELLIGENCE EXTRACTION
 # =========================
 def extract_intelligence(messages: list[dict]) -> dict:
-    text = " ".join(m["content"] for m in messages)
+    text = " ".join(m.get("content", "") for m in messages)
 
-    phone_numbers = re.findall(r'(?:\+91[\s-]?)?[6-9]\d{9}', text)
+    phone_numbers = re.findall(r'(?:\+91[\s-]?|0)?[6-9]\d{9}', text)
     upi_ids = re.findall(r'\b[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}\b', text)
     urls = re.findall(r'https?://[^\s]+', text)
 
@@ -42,61 +54,48 @@ def extract_intelligence(messages: list[dict]) -> dict:
         if num not in phone_numbers:
             bank_accounts.append(num)
 
+    emails = re.findall(
+        r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+        text
+    )
+
     return {
-        "upi_ids": list(set(upi_ids)),
         "phone_numbers": list(set(phone_numbers)),
+        "upi_ids": list(set(upi_ids)),
         "bank_accounts": list(set(bank_accounts)),
-        "urls": list(set(urls))
+        "urls": list(set(urls)),
+        "emails": list(set(emails))
     }
 
+
 # =========================
-# WEBHOOK
+# MAIN ENDPOINT
 # =========================
-@app.api_route("/webhook", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.post("/webhook")
 async def webhook(
-    request: Request,
+    request: ChatRequest,
     x_api_key: str | None = Header(default=None, alias="x-api-key")
 ):
-    # ---- Preflight / tester ----
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        return {"status": "ok"}
-
-    # ---- Auth ----
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # ---- Parse body ----
-    try:
-        body = await request.json()
-    except:
-        body = None
+    body = request.dict()
 
-    # ---- Empty tester call ----
-    if not body:
-        return {
-            "status": "success",
-            "reply": "hello"
-        }
-
-    # =========================
-    # GUVI REQUEST FORMAT
-    # =========================
     session_id = body.get("sessionId")
-    message_obj = body.get("message", {})
-    message_text = message_obj.get("text")
+    message_text = body.get("message", {}).get("text")
     history = body.get("conversationHistory", [])
 
     if not session_id or not message_text:
-        raise HTTPException(status_code=400, detail="Invalid request format")
+        raise HTTPException(status_code=400, detail="Invalid request")
 
     # =========================
-    # BUILD MEMORY
+    # MEMORY MANAGEMENT
     # =========================
     MEMORY.setdefault(session_id, [])
 
     if not MEMORY[session_id] and history:
         for msg in history:
-            role = "assistant" if msg.get("sender") == "user" else "user"
+            role = "user" if msg.get("sender") == "user" else "assistant"
             MEMORY[session_id].append({
                 "role": role,
                 "content": msg.get("text", "")
@@ -110,25 +109,40 @@ async def webhook(
     MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
 
     # =========================
-    # DETECTION + AGENT
+    # DETECTION
     # =========================
     detection = detect_scam(MEMORY[session_id])
 
-    reply_text = "can you explain this?"
+    # =========================
+    # EXTRACTION
+    # =========================
+    intel = extract_intelligence(MEMORY[session_id])
 
-    if detection.get("is_scam"):
-        reply_text = run_agent(
-            MEMORY[session_id],
-            detection.get("scam_type")
-        )
+    # =========================
+    # HONEYPOT RESPONSE
+    # =========================
+    reply_text = run_agent(
+        MEMORY[session_id],
+        detection.get("scam_type"),
+        mode="honeypot",
+        intel=intel
+    )
 
-        MEMORY[session_id].append({
-            "role": "assistant",
-            "content": reply_text
-        })
-        MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
+    MEMORY[session_id].append({
+        "role": "assistant",
+        "content": reply_text
+    })
 
+    MEMORY[session_id] = MEMORY[session_id][-MAX_TURNS:]
+
+    # =========================
+    # FINAL RESPONSE
+    # =========================
     return {
         "status": "success",
-        "reply": reply_text
+        "reply": reply_text,
+        "is_scam": detection.get("is_scam"),
+        "scam_type": detection.get("scam_type"),
+        "intel": intel,
+        "conversation": MEMORY[session_id] 
     }
