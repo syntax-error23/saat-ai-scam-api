@@ -1,5 +1,8 @@
 import os
 import json
+import re
+import random
+from typing import List, Dict, Optional
 from groq import Groq
 
 # =========================
@@ -10,163 +13,193 @@ if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not set")
 
 client = Groq(api_key=GROQ_API_KEY)
-
 MODEL = "llama-3.1-8b-instant"
 
+
 # =========================
-# SCAM DETECTION
+# SCAM DETECTION MODULE
 # =========================
-def detect_scam(messages: list[dict]) -> dict:
+def detect_scam(messages: List[Dict]) -> Dict:
     """
-    Fast + safe scam detection.
-    NEVER crashes.
+    Hybrid detection:
+    - fast keyword check
+    - LLM fallback
+    - safe output always
     """
-
-    joined = " ".join(m["content"].lower() for m in messages)
-
-    # ---- Fast heuristic (GUVI-friendly, low latency) ----
-    KEYWORDS = [
-        "urgent", "blocked", "verify", "otp",
-        "upi", "account", "suspended",
-        "immediately", "pay", "fee", "bank"
-    ]
-
-    if any(k in joined for k in KEYWORDS):
-        return {
-            "is_scam": True,
-            "scam_type": "phishing",
-            "confidence": 0.9,
-            "reason": "keyword_trigger"
-        }
-
-    # ---- LLM fallback (only if needed) ----
-    system_prompt = """
-You are an AI scam detection assistant.
-
-Decide whether the conversation indicates a scam.
-
-Rules:
-- Respond ONLY in valid JSON
-- No markdown
-- No extra text
-
-JSON format:
-{
-  "is_scam": true or false,
-  "scam_type": "payment" | "phishing" | "lottery" | "impersonation" | "other" | "none",
-  "confidence": number between 0 and 1,
-  "reason": "short explanation"
-}
-""".strip()
 
     try:
+        joined = " ".join(m.get("content", "").lower() for m in messages)
+
+        KEYWORDS = [
+            "otp", "verify", "upi", "payment", "urgent",
+            "bank", "lottery", "winner", "prize",
+            "blocked", "suspended", "click", "link",
+            "account", "transfer", "fee"
+        ]
+
+        if any(k in joined for k in KEYWORDS):
+            return {
+                "is_scam": True,
+                "scam_type": "phishing",
+                "confidence": 0.9,
+                "reason": "keyword_trigger"
+            }
+
+        # ---- LLM fallback
+        system_prompt = """
+Classify if this is a scam.
+
+Return ONLY JSON:
+{
+  "is_scam": true or false,
+  "scam_type": "phishing" | "payment" | "lottery" | "impersonation" | "other" | "none",
+  "confidence": number,
+  "reason": "short"
+}
+"""
+
         completion = client.chat.completions.create(
             model=MODEL,
             temperature=0,
+            max_tokens=80,
             messages=[
                 {"role": "system", "content": system_prompt},
                 *messages
             ],
-            timeout=8
+            timeout=6
         )
 
         raw = completion.choices[0].message.content.strip()
-        return json.loads(raw)
+
+        try:
+            return json.loads(raw)
+        except:
+            return {
+                "is_scam": False,
+                "scam_type": "none",
+                "confidence": 0.5,
+                "reason": "parse_fallback"
+            }
 
     except Exception:
-        # ---- ABSOLUTE SAFETY NET ----
         return {
-            "is_scam": True,
-            "scam_type": "other",
-            "confidence": 0.7,
-            "reason": "safe_fallback"
+            "is_scam": False,
+            "scam_type": "none",
+            "confidence": 0.5,
+            "reason": "error"
         }
 
 
 # =========================
-# AGENTIC HONEYPOT AGENT
+# HONEYPOT STRATEGY ENGINE
 # =========================
-def run_agent(memory: list[dict], scam_type: str | None = None) -> str:
+def get_next_question(intel: Dict, last_bot_msg: str) -> Optional[str]:
     """
-    Human-like honeypot agent.
-    GUARANTEED non-empty, non-garbage output.
+    Goal-driven extraction strategy
+    Avoid repetition + staged extraction
     """
 
-    SYSTEM_PROMPT = """
-you are a normal person replying casually to a message.
+    # PHONE
+    if not intel.get("phone_numbers"):
+        if "call me" not in last_bot_msg:
+            return "can you call me instead i dont understand"
 
-you do NOT know this is a scam.
-you think it might be real.
+    # UPI
+    if not intel.get("upi_ids"):
+        if "upi" not in last_bot_msg:
+            return "how do i send the money do you have upi"
 
-how you write:
-- all lowercase
-- natural short sentences
-- mildly confused or curious
-- sounds like a real human texting
+    # LINK
+    if not intel.get("urls"):
+        if "link" not in last_bot_msg:
+            return "can you send the link again"
 
-rules:
-- never mention scams, fraud, police, safety
-- never accuse
-- never analyze
-- ask only ONE question
-- reply must be a full sentence
-- no emojis
-- no symbols like ? alone
+    # BANK
+    if not intel.get("bank_accounts"):
+        if "transfer" not in last_bot_msg:
+            return "where should i transfer the money"
 
-reply with ONLY the message text.
-""".strip()
+    return None
 
-    FOLLOWUPS = {
-        "phishing": [
-            "why is my account being blocked",
-            "what do i need to verify",
-            "can you explain this"
-        ],
-        "payment": [
-            "how am i supposed to pay this",
-            "where do i send the money",
-            "what is this fee for"
-        ],
-        "impersonation": [
-            "who is this exactly",
-            "how do i check this is legit",
-            "can you share more details"
-        ],
-        "lottery": [
-            "how did i win this",
-            "what is this about",
-            "can you explain how this works"
-        ],
-        "other": [
-            "can you explain this",
-            "what is this regarding",
-            "why am i getting this message"
-        ]
-    }
 
-    options = FOLLOWUPS.get(scam_type or "other", FOLLOWUPS["other"])
-    seed_question = options[0]
+# =========================
+# OUTPUT CLEANING
+# =========================
+def clean_reply(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.replace("\\n", " ").replace("\n", " ")
+    text = re.sub(r'[\*\#\-\_]+', '', text)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+
+    if len(text) > 120:
+        text = text[:120]
+
+    return text
+
+
+# =========================
+# HONEYPOT AGENT
+# =========================
+def run_agent(
+    memory: List[Dict],
+    scam_type: Optional[str] = None,
+    mode: str = "honeypot",
+    intel: Optional[Dict] = None
+) -> str:
+    """
+    Core honeypot agent:
+    - stage-aware
+    - avoids repetition
+    - goal-driven extraction
+    - natural conversation
+    """
 
     try:
-        completion = client.chat.completions.create(
-            model=MODEL,
-            temperature=0.6,
-            max_tokens=40,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                *memory,
-                {"role": "assistant", "content": seed_question}
-            ],
-            timeout=8
-        )
+        # =========================
+        # STEP 0: ANALYZE MEMORY
+        # =========================
+        user_msgs = [m for m in memory if m.get("role") == "user"]
+        bot_msgs = [m for m in memory if m.get("role") == "assistant"]
 
-        reply = completion.choices[0].message.content.strip().lower()
+        turn_count = len(user_msgs)
+        last_bot_msg = bot_msgs[-1]["content"] if bot_msgs else ""
+
+        # =========================
+        # STEP 1: FIRST MESSAGE FIX
+        # =========================
+        if turn_count == 1:
+            return "how do i claim this"
+
+        # =========================
+        # STEP 2: SMART EXTRACTION
+        # =========================
+        if intel:
+            question = get_next_question(intel, last_bot_msg)
+            if question:
+                return question
+
+        # =========================
+        # STEP 3: NATURAL VARIATION
+        # =========================
+        fallback_options = [
+            "what do i need to do",
+            "i dont understand can you explain",
+            "what is this about",
+            "how does this work",
+            "what happens next",
+            "can you explain properly",
+            "what should i do now"
+        ]
+
+        # avoid repeating same fallback
+        safe_options = [opt for opt in fallback_options if opt not in last_bot_msg]
+
+        if safe_options:
+            return random.choice(safe_options)
+
+        return "what is this about"
 
     except Exception:
-        reply = ""
-
-    # ---- FINAL GUARDRAIL ----
-    if not reply or len(reply) < 6:
-        reply = "why is my account being blocked"
-
-    return reply
+        return "what is this about"
