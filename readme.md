@@ -107,10 +107,9 @@ Bot: can you send the link again
 
 User: go to https://fakebank-login.com
 
-Team
+##Team
 
 This project was developed as part of a 4-member team:
-
 Tanmay Das
 Shubham Kulkarni
 Arin Pattnaik
